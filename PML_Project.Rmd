@@ -1,0 +1,229 @@
+---
+title: "PML Project"
+author: "Giuseppe"
+date: "06 febbraio 2016"
+output: html_document
+---
+# Executive summary
+The goal of this project is to predict the manner in which peolple do the exercises. 
+After loading all the packages we need during our analysis and downloading the datasets, I began exploring data.
+A lot of variables are plenty of NA values, and I removed them from datasets. Then, I checked the zerovariance 
+predictor, the multicollinearity, and finally I split data into train and validation set.
+
+After building and evaluating some models, I found out that the best one is the Random Forest model, and I used it to predict the cases of our test dataset.
+
+
+### installing/loading the packages:
+```{r, echo=FALSE, warning=FALSE}
+# installing/loading the packages:
+# if(!require(caret)) {  install.packages("caret"); require(caret)} #load / install+load
+# if(!require(rattle)) {  install.packages("rattle"); require(rattle)} #load / install+load
+# if(!require(rpart)) {  install.packages("rpart"); require(rpart)} #load / install+load
+# if(!require(randomForest)) {  install.packages("randomForest"); require(randomForest)} #load / install+load
+# if(!require(repmis)) {  install.packages("repmis"); require(repmis)} #load / install+load
+# if(!require(funModeling)) {  install.packages("funModeling"); require(funModeling)} #load / install+load
+# if(!require(doSNOW)) {  install.packages("doSNOW"); require(doSNOW)} #load / install+load
+# if(!require(gbm)) {  install.packages("gbm"); require(gbm)} #load / install+load
+# if(!require(e1071)) {  install.packages("e1071"); require(e1071)} #load / install+load
+# if(!require(kernlab)) {  install.packages("kernlab"); require(kernlab)} #load / install+load
+# if(!require(corrplot)) {  install.packages("corrplot"); require(corrplot)} #load / install+load
+library(caret);library(rattle);library(rpart);library(randomForest);library(repmis);library(funModeling);library(doSNOW)
+library(gbm);library(e1071);library(kernlab);library(corrplot)
+```
+
+### clearing the workspace
+```{r}
+rm(list=ls())
+```
+
+### importing the data
+```{r}
+train_file <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+train <- read.csv(url(train_file), na.strings=c("", "NA", "NULL", "#DIV/0!"), stringsAsFactors=TRUE)
+test_file <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+test <- read.csv(url(test_file), na.strings=c("", "NA", "NULL", "#DIV/0!"), stringsAsFactors=TRUE)
+```
+
+## EDA
+```{r}
+dim(train)
+#str(train)
+table(train$classe)/nrow(train)
+plot(train$classe, main="Classe distribution in Train dataset", xlab="Classe")
+
+train_status <- df_status(train)
+
+#q_zeros: quantity of zeros (p_zeros: in percentage)
+#q_na: quantity of NA (p_na: in percentage)
+#type: factor or numeric
+#unique: quantity of unique values
+
+```
+
+#Data Preparation
+##Removing variables with at least 75% of NA values
+```{r}
+vars_to_remove=subset(train_status, train_status$p_na > 75)  
+vars_to_remove["variable"]  
+
+## Keeping all except vars_to_remove 
+train=train[, !(names(train) %in% vars_to_remove[,"variable"])]
+test=test[, !(names(test) %in% vars_to_remove[,"variable"])]
+```
+
+
+## Removing other columns that are not important for the analysis
+```{r}
+train <- train[, -c(1:7)]
+test <- test[, -c(1:7)]
+dim(train); dim(test)
+```
+
+
+## Transforming all integer to numeric variables
+```{r}
+train[, c(4,8:13,17,21:26,30,34:38,43,47:50)]  <- as.numeric(unlist(train[, c(4,8:13,17,21:26,30,34:38,43,47:50)]))
+test[, c(4,8:13,17,21:26,30,34:38,43,47:50)]  <- as.numeric(unlist(test[, c(4,8:13,17,21:26,30,34:38,43,47:50)]))
+```
+
+## Filtering Predictors
+### Checking for multicollinearity
+Since a lot of models can have poor performance in case of multicollinearity (i.e., high correlations between predictors)
+I now evaluate if this is the case.
+Principal component analysis can be used to reduce the number of dimensions or, alternatively, I can identify and remove
+predictors that contribute the most to the correlations.
+In this project I decided to remove all predictors with correlations greater than 0.90 (using the findCorrelation function). 
+
+```{r}
+corrplot(cor(train[, -53]), method = "number", tl.cex = 0.5)
+
+ncol(train)
+trainCorr <- cor(train[-53])
+highCorr <- findCorrelation(trainCorr, 0.90)
+train <- train[, -highCorr]
+test <- test[, -highCorr]
+ncol(train); ncol(test)
+
+```
+
+### Checking for zerovariance predictors
+Another problem could be the presence of "zerovariance predictors" that will cause the model to fail. 
+The function nearZeroVar can be used to identify near zero-variance predictors in a dataset. 
+
+```{r}
+nzv <- nearZeroVar(train, saveMetrics= TRUE)
+head (nzv)
+nzv[nzv$nzv,][1:10,]
+dim(train)
+nzv <- nearZeroVar(train)
+#filteredDescr <- train[, -nzv]
+
+# there are no "zerovariance predictors" 
+
+#dim(train)
+```
+
+
+## Splitting data in train and validation set
+I'm going to do an initial split of the data into train and vaidation sets.
+The validation set will be used only to evaluate performance and the train set will be used to build models.
+70% of the data will be used for training model and the remaining will be used for evaluating model performance. 
+
+```{r}
+set.seed(131292) 
+# Initial data split
+inTrain <- createDataPartition(train$classe, p = 0.7, list = FALSE)
+trainSet <- train[inTrain, ]
+validationSet <- train[-inTrain, ]
+dim(trainSet); dim(validationSet)
+```
+
+# Train Model  
+```{r}
+# I set up R for parallel processing with the following code, which will allow caret to allot tasks to 4 cores simultaneously
+registerDoSNOW(makeCluster(4, type = "SOCK"))
+```
+
+## Tuning and Building models   
+```{r}
+# Setting the parameters for model preprocessing and tuning from the caret package: 
+cvControl <- trainControl(## 10-fold Crossvalidation
+                           method = "repeatedcv", 
+                           repeats = 3,
+                           number=10,
+                           # PCA Preprocessing
+                           preProcOptions="pca"
+                           )
+
+# Model Training
+set.seed(131292) 
+model.rpart <- train(classe ~ ., data=trainSet, method="rpart", cp=0.1, trControl= cvControl)
+set.seed(131292) 
+model.rf <- train(classe ~ ., data = trainSet, method = "rf", trControl= cvControl)
+set.seed(131292) 
+model.gbm <- train(classe ~ ., data = trainSet, method = "gbm", trControl= cvControl)
+set.seed(131292) 
+model.svmRadial <- train(classe ~ ., data = trainSet, method = "svmRadial", tuneLength = 5, trControl = cvControl)
+set.seed(131292) 
+model.svmLinear <- train(classe ~ ., data = trainSet, method = "svmLinear", tuneLength = 5, trControl = cvControl)
+```
+
+## Evaluating Model Performances
+```{r}
+# Collect resamples
+models <- list(rpart = model.rpart, rf = model.rf, gbm = model.gbm, svmRadial = model.svmRadial, svmLinear = model.svmLinear)
+cvValues <- resamples(models)
+summary(cvValues)
+```
+
+  
+```{r}
+bwplot(cvValues)
+#dotplot(cvValues)
+#parallelplot(cvValues)
+#xyplot(cvValues)
+splom(cvValues)
+summary(diff(cvValues))
+dotplot(diff(cvValues))
+
+print(models)
+
+model.rf$finalModel
+
+#Density plots
+resampleHist(model.rf)
+
+```
+
+### I can consider the Random Forest the best model in the list, and so I explore it more in detail and then we use it on validation and test datasets.
+
+## Predictor importance
+```{r}
+varImp(model.rf, scale = FALSE)
+plot(varImp(model.rf), top = 10)
+```
+
+## Model Evaluation
+```{r}
+valid.prediction <- predict(model.rf, validationSet)
+confusionMatrix(valid.prediction,validationSet$classe)
+```
+
+### To finish the project I use our model to predict our 20 test cases.
+```{r}
+test.prediction <- predict(model.rf,test)
+test.prediction
+
+# all quiz questions were answered correctly
+
+```
+
+## Reference
+Journal of Statistical Software
+November 2008, Volume 28, Issue 5. 
+http://www.jstatsoft.org/
+
+Package 'caret'
+January 6, 2016
+Version 6.0-64
+Date 2016-01-04
